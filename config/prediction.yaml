@@ -1,0 +1,4 @@
+prediction:
+  model: constant_velocity
+  horizon_s: 5.0
+  blocked_risk_threshold: 0.8

@@ -1,0 +1,9 @@
+Panels: {Class: rviz_common/Displays}
+Visualization Manager:
+  Class: ""
+  Global Options: {Fixed Frame: map, Background Color: 48; 48; 48}
+  Displays:
+    - {Class: rviz_default_plugins/RobotModel, Name: Ambulance}
+    - {Class: rviz_default_plugins/LaserScan, Name: LiDAR, Topic: /ambulance/scan}
+    - {Class: rviz_default_plugins/Odometry, Name: Odometry, Topic: /ambulance/odom}
+    - {Class: rviz_default_plugins/Path, Name: Global Plan, Topic: /plan}

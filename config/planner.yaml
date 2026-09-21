@@ -1,0 +1,5 @@
+planner:
+  emergency_weights: {distance: 0.20, time: 0.42, energy: 0.10, traffic: 0.16, risk: 0.12}
+  normal_weights: {distance: 0.34, time: 0.23, energy: 0.20, traffic: 0.13, risk: 0.10}
+  prediction_horizon_s: 5.0
+  affected_radius_m: 10.0

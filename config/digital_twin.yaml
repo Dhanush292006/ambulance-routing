@@ -1,0 +1,3 @@
+digital_twin:
+  synchronization_rate_hz: 1.0
+  publish_topics: [robot_state, environment, obstacles, graph, route, status]

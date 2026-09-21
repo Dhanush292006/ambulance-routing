@@ -1,0 +1,5 @@
+energy:
+  battery_wh: 4000.0
+  rolling_wh_per_m: 0.042
+  acceleration_wh_per_mps2: 0.12
+  computation_w: 38.0

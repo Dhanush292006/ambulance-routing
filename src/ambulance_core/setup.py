@@ -1,0 +1,2 @@
+from setuptools import setup
+setup(name='ambulance_core', version='0.1.0', packages=['ambulance_core'], data_files=[('share/ament_index/resource_index/packages',['resource/ambulance_core']),('share/ambulance_core',['package.xml'])], install_requires=['setuptools'], zip_safe=True, entry_points={'console_scripts':['digital_twin_node=ambulance_core.ros_node:main','ambulance_demo=ambulance_core.demo:main','ambulance_experiments=ambulance_core.experiments:main']})
