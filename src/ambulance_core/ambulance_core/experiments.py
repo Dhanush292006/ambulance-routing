@@ -8,3 +8,5 @@ def main():
     out=Path('results')/a.scenario; out.mkdir(parents=True,exist_ok=True)
     with (out/'comparison.csv').open('w',newline='') as f: csv.DictWriter(f,fieldnames=rows[0]).writeheader(); csv.DictWriter(f,fieldnames=rows[0]).writerows(rows)
     (out/'summary.json').write_text(json.dumps(rows,indent=2)); print(json.dumps(rows,indent=2))
+if __name__ == '__main__':
+    main()
