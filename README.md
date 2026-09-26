@@ -14,7 +14,7 @@ This is a ROS 2 Jazzy / Gazebo Harmonic research demonstrator for adaptive emerg
 
 The included `--demo` mode runs without Gazebo and records values measured by the simulation engine—not static dashboard fixtures. It writes `results/latest/{metrics,events,route_history}.json` and is the fastest way to inspect all research layers. Gazebo/ROS launch is available with `./run.sh --ros` after installing Nav2 and Gazebo Harmonic ROS integration.
 
-For the full automatic demonstration, run `./auto_demo.sh`. It builds the workspace, runs the measured emergency scenario, opens Gazebo, and starts the dashboard. Press `Ctrl+C` in its terminal to stop both processes.
+For the full Gazebo demonstration, follow the ROS / Gazebo steps below. The `--demo` mode is a separate algorithm demonstration that does not launch Gazebo.
 
 ## Architecture
 
@@ -33,17 +33,17 @@ python3 -m ambulance_core.experiments --scenario accident
 
 ## ROS / Gazebo
 
-Build with `colcon build --symlink-install`, source `install/setup.bash`, then:
+Build with `./build.sh`, then start the integrated simulation and dashboard in separate terminals:
 
 ```bash
 ./gazebo.sh
 ```
 
-`gazebo.sh` starts the Gazebo city and the ROS digital-twin node. In another terminal, run `./run.sh --demo` to generate the deterministic emergency scenario telemetry, then `./dashboard.sh` to show it. Gazebo is started as a visual/sensor physical layer; use `ros_gz_bridge` to bridge native Gazebo sensor topics into ROS for a hardware-in-the-loop extension.
+The Gazebo world is a Chennai-inspired 1.5 km × 1 km city grid with a Marina-style coast, 140 mixed-use blocks, 18 looping traffic vehicles, eight looping ambulances, and six parked ambulance fleet units. The full-size matching Nav2 map is installed with the bringup package.
 
-### Live SLAM, Nav2, and dashboard data flow
+`./gazebo.sh` starts the Gazebo city, ROS bridges, AMCL, Nav2, the DT-AAGR digital twin, and the mission manager. It loads the included road map and uses Gazebo odometry aligned to the map frame. `./gazebo.sh headless:=true` runs the server without a window while keeping GPU LiDAR rendering enabled. In a second terminal, `./dashboard.sh` opens the live mission dashboard at `http://localhost:8501`.
 
-`./gazebo.sh` now also starts SLAM Toolbox and Nav2. The launch bridges Gazebo `/clock`, `/ambulance/scan`, `/ambulance/odom`, and `/ambulance/cmd_vel` to ROS; `ambulance_odom_tf` publishes the odometry-derived TF chain required by SLAM: `odom → base_link → base_footprint / lidar_link`. SLAM Toolbox publishes `/map`; Nav2 consumes `/map`, `/scan`, `/odom`, and TF for localization/costmaps. The digital-twin node persists its live ROS state to `results/latest/metrics.json`, which the Streamlit dashboard reads on refresh.
+The dashboard sends destination and mission commands to ROS 2. DT-AAGR selects graph waypoints, and the mission manager sends each waypoint to Nav2. Nav2 plans, controls, and avoids local obstacles; its velocity commands pass through the collision monitor and Gazebo bridge. Gazebo odometry supplies the dashboard pose and measured path length. `/scan` drives the local/global costmaps and the obstacle detector. The simulated mission can be run to each of the five facilities and returned to the station.
 
 ## White ambulance teleoperation
 
@@ -55,21 +55,21 @@ The final `ambulance_01` model is a white body with red emergency stripes, blue 
 
 Use `i` / `,` to increase/decrease forward speed, `j` / `l` to steer, and `k` to stop. The command follows `/ambulance/cmd_vel` through `ros_gz_bridge` into Gazebo's differential-drive system. Keep the teleoperation terminal focused while driving.
 
-### Obstacle-driven replanning
+### Obstacle handling
 
-The central arterial now contains a LiDAR-visible orange `replan_barrier` and three traffic cones around x=90 m. `lidar_obstacle_detector` uses the live `/scan` and `/ambulance/odom` topics to publish real obstacle positions to `/ambulance/obstacles`. The digital twin updates only the affected road edges and records the replanning event in `results/latest/events.json`; Nav2 simultaneously adds the scan return to its local costmap for collision avoidance. Drive toward the central obstruction in teleoperation, then use the north or south bypass.
+The world includes a central roadblock, traffic, and bypass corridors. LiDAR scans feed Nav2 costmaps and an obstacle detector; the digital twin can update affected graph edges and produce a new route. Static roadblock detection depends on sensor visibility and the vehicle approach, so inspect the live obstacle and replan counters in the dashboard during a run.
 
-### Nav2 goal on the SLAM map
+### Emergency mission demo
 
-After driving enough to map the corridor, send a goal in the live `map` frame:
+1. Run `./build.sh`.
+2. Start `./gazebo.sh` (add `headless:=true` on machines without a display).
+3. In another terminal, run `./dashboard.sh`.
+4. Select a hospital and press **START EMERGENCY MISSION**. The ambulance starts at the station, follows DT-AAGR waypoints under Nav2 control, and publishes its measured pose and mission result to the dashboard.
+5. Watch the live pose, route, mission state, and replan counter in the dashboard. Mission status and completed-run metrics are also written under `results/latest/`.
 
-```bash
-./nav_goal.sh --x 145 --y 0 --yaw 0
-```
+Pause, resume, cancel, return-to-station, and RViz2 are wired to their ROS 2 actions or processes. Nav2 can also be tested directly with `./nav_goal.sh --x 145 --y 0 --yaw 0`.
 
-This invokes Nav2's `navigate_to_pose` action, not a timed motion script. Nav2 uses the current SLAM map and live LiDAR costmap to plan and avoid the barrier. Use an explored location first (for example `--x 25 --y 0`) before sending the hospital goal.
-
-`ambulance_description` provides the vehicle URDF; `ambulance_gazebo/worlds/smart_city.sdf` provides a Gazebo Harmonic city with three road corridors, cross-links, hospital emergency entrance, ambulance station, urban districts, signals, construction zone, vehicles, and native LiDAR/camera/IMU/GPS topics. Install the standard Jazzy packages appropriate to your OS: `ros-jazzy-nav2-bringup`, `ros-jazzy-robot-state-publisher`, `ros-jazzy-ros-gz-sim`, and `ros-jazzy-rviz2`. The core node intentionally has no Nav2 API dependency; it publishes a route plan that a Nav2 bridge can consume.
+`ambulance_description` provides the vehicle URDF; `ambulance_gazebo/worlds/smart_city.sdf` provides a Gazebo Harmonic city with three road corridors, cross-links, hospital emergency entrance, ambulance station, urban districts, signals, construction zone, vehicles, and native LiDAR/camera/IMU/GPS topics. Install the Jazzy Nav2, `ros_gz`, robot-state-publisher, and RViz packages required by the launch file if they are not already installed. Then run `./setup.sh` and `./build.sh` from the workspace.
 
 ## Data and caveats
 
@@ -77,4 +77,11 @@ All generated plots/summary values are derived from the current run's route and 
 
 ## Topics
 
-The core node publishes JSON state on `/digital_twin/status`, `/digital_twin/route`, `/digital_twin/obstacles`, and `/ambulance/status`; it subscribes to `/ambulance/obstacles` (`std_msgs/String` JSON list) and `/ambulance/emergency`. A simulator integration should also supply `/ambulance/scan`, `/ambulance/camera/image_raw`, `/ambulance/imu`, `/ambulance/odom`, and `/ambulance/gps`.
+The integration uses `/clock`, `/scan`, `/ambulance/odom`, `/ambulance/cmd_vel`, `/ambulance/obstacles`, `/digital_twin/status`, `/digital_twin/route`, `/digital_twin/destination`, and `/dashboard/mission_command`. See the launch file and node sources for message types.
+
+
+## Dashboard mission controls
+
+With the ROS stack running via `./gazebo.sh`, launch `./dashboard.sh`. The dashboard publishes destination and mission commands on `/dashboard/mission_command`; `ambulance_mission_manager` translates start, pause, resume, and cancel into Nav2 `NavigateToPose` actions. Nav2 remains responsible for vehicle motion. Mission state is written to `results/latest/mission_status.json`. Rebuild with `./build.sh` after changing the ROS package.
+
+The Gazebo city includes five hospital facilities with road-side goal poses. The real-world Chennai panel requires an authorized Google Maps Platform key and remains visibly unavailable until configured. The Chennai reference panel requires an authorized Google Maps Platform integration and key, which are not configured in this workspace.

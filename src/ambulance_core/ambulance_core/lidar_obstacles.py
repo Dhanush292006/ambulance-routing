@@ -1,32 +1,117 @@
-"""Convert actual Gazebo LiDAR returns plus odometry into twin obstacle updates."""
-import json, math
+#!/usr/bin/env python3
+
+import math
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import Odometry
-from std_msgs.msg import String
+from std_msgs.msg import Bool, Float32
+
 
 class LidarObstacleDetector(Node):
+
     def __init__(self):
-        super().__init__('lidar_obstacle_detector'); self.pose = None; self.last = None
-        self.pub = self.create_publisher(String, '/ambulance/obstacles', 10)
-        self.create_subscription(Odometry, '/ambulance/odom', self.on_odom, 10)
-        self.create_subscription(LaserScan, '/scan', self.on_scan, 10)
-    def on_odom(self, msg):
-        p=msg.pose.pose; q=p.orientation
-        self.pose=(p.position.x,p.position.y,math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))
-    def on_scan(self, scan):
-        if self.pose is None: return
-        samples=[(r,scan.angle_min+i*scan.angle_increment) for i,r in enumerate(scan.ranges)
-          if math.isfinite(r) and scan.range_min < r < min(scan.range_max,9.0) and abs(scan.angle_min+i*scan.angle_increment)<math.radians(35)]
-        if not samples:
-            if self.last is not None: self.pub.publish(String(data='[]')); self.last=None
-            return
-        distance,angle=min(samples); x,y,yaw=self.pose; ox=x+distance*math.cos(yaw+angle); oy=y+distance*math.sin(yaw+angle)
-        state=(round(ox,1),round(oy,1))
-        if state==self.last: return
-        self.last=state
-        self.pub.publish(String(data=json.dumps([{'id':'lidar_obstacle_01','kind':'detected road obstacle','x':ox,'y':oy,'vx':0.0,'vy':0.0,'risk':1.0}])))
-        self.get_logger().info(f'LiDAR obstacle at ({ox:.1f}, {oy:.1f}), {distance:.1f} m')
-def main():
-    rclpy.init(); node=LidarObstacleDetector(); rclpy.spin(node); node.destroy_node(); rclpy.shutdown()
+        super().__init__('lidar_obstacle_detector')
+
+        self.declare_parameter('detection_distance', 4.0)
+        self.declare_parameter('front_angle_deg', 70.0)
+        self.declare_parameter('min_valid_range', 0.15)
+
+        self.distance_limit = float(
+            self.get_parameter('detection_distance').value
+        )
+
+        self.front_angle = math.radians(
+            float(self.get_parameter('front_angle_deg').value)
+        )
+
+        self.min_range = float(
+            self.get_parameter('min_valid_range').value
+        )
+
+        self.obstacle_pub = self.create_publisher(
+            Bool,
+            '/ambulance/roadblock_detected',
+            10
+        )
+
+        self.distance_pub = self.create_publisher(
+            Float32,
+            '/ambulance/obstacle_distance',
+            10
+        )
+
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            10
+        )
+
+        self.previous_state = False
+
+        self.get_logger().info(
+            'LiDAR obstacle detector ACTIVE'
+        )
+
+    def scan_callback(self, msg):
+
+        minimum = float('inf')
+        angle = msg.angle_min
+
+        for r in msg.ranges:
+
+            if math.isfinite(r) and r >= self.min_range:
+
+                if abs(angle) <= self.front_angle:
+
+                    if r < minimum:
+                        minimum = r
+
+            angle += msg.angle_increment
+
+        detected = minimum <= self.distance_limit
+
+        distance = Float32()
+
+        if math.isfinite(minimum):
+            distance.data = float(minimum)
+        else:
+            distance.data = -1.0
+
+        self.distance_pub.publish(distance)
+
+        state = Bool()
+        state.data = detected
+        self.obstacle_pub.publish(state)
+
+        if detected != self.previous_state:
+
+            if detected:
+                self.get_logger().warn(
+                    f'ROADBLOCK DETECTED: {minimum:.2f} m'
+                )
+            else:
+                self.get_logger().info(
+                    'ROADBLOCK CLEARED'
+                )
+
+            self.previous_state = detected
+
+
+def main(args=None):
+
+    rclpy.init(args=args)
+
+    node = LidarObstacleDetector()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

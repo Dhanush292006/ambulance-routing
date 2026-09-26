@@ -17,7 +17,7 @@ class OdomTf(Node):
         footprint.transform.rotation.w = 1.0
         sensor = TransformStamped(); sensor.header.stamp = stamp
         sensor.header.frame_id = 'base_link'; sensor.child_frame_id = 'lidar_link'
-        sensor.transform.translation.x = 1.7; sensor.transform.translation.z = 1.1
+        sensor.transform.translation.x = 3.0; sensor.transform.translation.z = 0.20
         sensor.transform.rotation.w = 1.0
         self.static_tf.sendTransform([footprint, sensor])
     def on_odom(self, msg):
@@ -29,4 +29,4 @@ class OdomTf(Node):
         tf.transform.rotation = msg.pose.pose.orientation
         self.tf.sendTransform(tf)
 def main():
-    rclpy.init(); node = OdomTf(); rclpy.spin(node); node.destroy_node(); rclpy.shutdown()
+    rclpy.init(); node = OdomTf(); rclpy.spin(node); node.destroy_node(); rclpy.try_shutdown()
