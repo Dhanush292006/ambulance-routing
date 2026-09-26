@@ -4,6 +4,9 @@ import json
 import math
 import subprocess
 import sys
+import time
+import re
+import xml.etree.ElementTree as ET
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -32,6 +35,127 @@ def read_json(name):
         return json.loads((RESULTS / name).read_text())
     except (OSError, json.JSONDecodeError):
         return None
+
+
+@st.cache_data
+def read_vehicle_catalog():
+    """Read the named city fleet and configured waypoints from its SDF."""
+    sdf = ROOT / 'src/ambulance_gazebo/worlds/smart_city.sdf'
+    try:
+        world = ET.parse(sdf).getroot().find('world')
+    except (OSError, ET.ParseError):
+        return []
+    if world is None:
+        return []
+    models = []
+    for model in world.findall('model'):
+        name = model.get('name', '')
+        if not (name == 'ambulance' or 'ambulance' in name or
+                re.fullmatch(r'chennai_traffic_\d+', name) or
+                re.fullmatch(r'downtown_car_\d+', name) or name == 'roadblock_vehicle'):
+            continue
+        pose = (model.findtext('pose') or '').split()
+        values = [float(v) for v in pose[:6]]
+        values += [0.0] * (6 - len(values))
+        static = (model.findtext('static') or 'false').strip().lower() == 'true'
+        trajectory = model.find("plugin[@filename='gz-sim-trajectory-follower-system']")
+        waypoints = []
+        if trajectory is not None:
+            for waypoint in trajectory.findall('./waypoints/waypoint'):
+                pair = waypoint.text.split() if waypoint.text else []
+                if len(pair) >= 2:
+                    waypoints.append([float(pair[0]), float(pair[1])])
+        models.append({
+            'name': name, 'x': values[0], 'y': values[1], 'yaw': values[5],
+            'static': static, 'waypoints': waypoints,
+            'kind': ('ambulance' if 'ambulance' in name else
+                     'road service vehicle' if name == 'roadblock_vehicle' else 'traffic vehicle'),
+        })
+    # Keep the ROS/Nav2 vehicle first, then moving, district, parked ambulances.
+    amb_sort = {'ambulance': 0, 'chennai_ambulance': 1,
+                'district_ambulance': 2, 'parked_ambulance': 3}
+    ambs = [m for m in models if m['kind'] == 'ambulance']
+    ambs.sort(key=lambda m: (amb_sort.get('_'.join(m['name'].split('_')[:2]), 4), m['name']))
+    for number, model in enumerate(ambs, 1):
+        model['fleet_id'] = f'AMB-{number:02d}'
+    cars = [m for m in models if m['kind'] != 'ambulance']
+    cars.sort(key=lambda m: (0 if m['name'].startswith('chennai_traffic') else
+                             1 if m['name'].startswith('downtown_car') else 2, m['name']))
+    for number, model in enumerate(cars, 1):
+        model['fleet_id'] = f'VEH-{number:02d}'
+    return sorted(ambs + cars, key=lambda m: (m['kind'] != 'ambulance', m['fleet_id']))
+
+
+def read_gazebo_poses():
+    """Read one named-entity pose snapshot from Gazebo Transport."""
+    try:
+        result = subprocess.run(
+            ['gz', 'topic', '--json-output', '-e', '-t',
+             '/world/smart_city/dynamic_pose/info', '-n', '1'],
+            cwd=ROOT, capture_output=True, text=True, timeout=2.0, check=False,
+        )
+        message = json.loads(result.stdout) if result.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return {}
+    poses = {}
+    for item in message.get('pose', []):
+        name = item.get('name')
+        if not name:
+            continue
+        position = item.get('position', {})
+        orientation = item.get('orientation', {})
+        poses[name] = {
+            'x': float(position.get('x', 0.0)), 'y': float(position.get('y', 0.0)),
+            'z': float(position.get('z', 0.0)),
+            'yaw': 2.0 * math.atan2(float(orientation.get('z', 0.0)),
+                                    float(orientation.get('w', 1.0))),
+        }
+    return poses
+
+
+def make_fleet_map(fleet, slam, selected_id):
+    if slam:
+        grid = np.asarray(slam['data'], dtype=np.int16).reshape(slam['height'], slam['width'])
+        gray = np.flipud(np.where(grid < 0, 190, np.where(grid > 50, 26, 246))).astype(np.uint8)
+        canvas = Image.fromarray(np.stack([gray, gray, gray], axis=-1))
+        ox, oy = slam['origin']
+        resolution = float(slam['resolution'])
+        height, width = int(slam['height']), int(slam['width'])
+    else:
+        resolution, ox, oy = 0.5, -400.0, -500.0
+        width, height = 3000, 2000
+        canvas = Image.new('RGB', (width, height), (230, 233, 235))
+    draw = ImageDraw.Draw(canvas)
+
+    def pixel(x, y):
+        return ((x - ox) / resolution, height - 1 - (y - oy) / resolution)
+
+    for model in fleet:
+        pose = model.get('pose') or {'x': model['x'], 'y': model['y'], 'yaw': model['yaw']}
+        x, y = pixel(pose['x'], pose['y'])
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        active = model['kind'] == 'ambulance'
+        radius = 7 if active else 5
+        color = (211, 42, 47) if active else (30, 116, 212)
+        if model['fleet_id'] == selected_id:
+            draw.ellipse((x-radius-4, y-radius-4, x+radius+4, y+radius+4),
+                         outline=(255, 178, 0), width=3)
+        draw.ellipse((x-radius, y-radius, x+radius, y+radius),
+                     fill=color, outline=(255, 255, 255), width=1)
+        draw.text((x+radius+1, y-radius-4), model['fleet_id'].split('-')[1],
+                  fill=(110, 25, 28) if active else (15, 44, 89))
+    return canvas
+
+
+def fleet_status(model, live_pose, speed):
+    if model['name'] == 'ambulance':
+        return 'RUNNING' if live_pose and speed > 0.05 else 'READY'
+    if model['name'].startswith('parked_'):
+        return 'PARKED'
+    if model['static']:
+        return 'STATIONED'
+    return 'MOVING' if live_pose else 'READY'
 
 
 def send_command(action, destination_id=None):
@@ -183,6 +307,44 @@ def mission_panel():
     metrics = read_json('metrics.json') or {}
     slam = read_json('slam_map.json')
     pose = status.get('pose') or metrics.get('pose') or {}
+    catalog = read_vehicle_catalog()
+    gazebo_poses = read_gazebo_poses()
+    now = time.monotonic()
+    previous = st.session_state.get('_fleet_previous_poses', {})
+    live_pose_cache = dict(st.session_state.get('_fleet_live_pose_cache', {}))
+    live_pose_cache.update(gazebo_poses)
+    previous_time = st.session_state.get('_fleet_previous_time', now)
+    dt = max(0.1, now - previous_time)
+    fleet = []
+    for entry in catalog:
+        vehicle = dict(entry)
+        live_pose = live_pose_cache.get(vehicle['name'])
+        if vehicle['name'] == 'ambulance' and not live_pose:
+            live_pose = pose if pose.get('x') is not None and pose.get('y') is not None else None
+        vehicle['pose'] = live_pose or {'x': vehicle['x'], 'y': vehicle['y'], 'yaw': vehicle['yaw']}
+        old = previous.get(vehicle['name'])
+        if live_pose and old:
+            vehicle['speed_mps'] = math.hypot(live_pose['x'] - old['x'], live_pose['y'] - old['y']) / dt
+        else:
+            vehicle['speed_mps'] = 0.0
+        if vehicle['name'] == 'ambulance':
+            vehicle['speed_mps'] = float(metrics.get('speed_mps', status.get('speed_mps', vehicle['speed_mps'])) or 0.0)
+        vehicle['live_pose'] = live_pose
+        vehicle['status'] = fleet_status(vehicle, live_pose, vehicle['speed_mps'])
+        fleet.append(vehicle)
+    st.session_state['_fleet_previous_poses'] = {
+        vehicle['name']: {'x': vehicle['pose']['x'], 'y': vehicle['pose']['y']}
+        for vehicle in fleet if vehicle['live_pose']
+    }
+    st.session_state['_fleet_live_pose_cache'] = live_pose_cache
+    st.session_state['_fleet_previous_time'] = now
+    ambulances = [v for v in fleet if v['kind'] == 'ambulance']
+    active_id = st.session_state.get('selected_ambulance_id', 'AMB-01')
+    if not any(v['fleet_id'] == active_id for v in ambulances):
+        active_id = 'AMB-01'
+        st.session_state['selected_ambulance_id'] = active_id
+    selected = next(v for v in ambulances if v['fleet_id'] == active_id)
+
     st.subheader('EMERGENCY MISSION CONTROL')
     chosen = st.selectbox('DESTINATION', list(HOSPITALS), key='hospital')
     cols = st.columns(5)
@@ -213,6 +375,60 @@ def mission_panel():
     top[2].metric('AMBULANCE SPEED', f"{float(metrics.get('speed_mps', status.get('speed_mps', 0)) or 0) * 3.6:.1f} km/h")
     top[3].metric('BATTERY', f"{float(metrics.get('battery_pct', 100) or 0):.1f}%")
     top[4].metric('DT-AAGR REPLANS', int(metrics.get('replans', status.get('replans', 0)) or 0))
+
+    st.subheader(f"LIVE CITY FLEET · {len(fleet)} VEHICLES · {len(ambulances)} AMBULANCES")
+    map_col, fleet_col = st.columns([1.55, 1])
+    with map_col:
+        fleet_map = make_fleet_map(fleet, slam, active_id)
+        st.image(fleet_map, caption='Gazebo fleet map · red = ambulance · blue = traffic vehicle · gold ring = selected ambulance · numbered IDs match fleet list', width='stretch')
+        st.caption(f"Live Gazebo pose snapshot: {len(gazebo_poses)} entities · {sum(1 for v in fleet if v['live_pose'])}/{len(fleet)} fleet vehicles reporting live poses")
+    with fleet_col:
+        st.markdown('#### Numbered ambulance list')
+        ambulance_cols = st.columns(3)
+        for i, vehicle in enumerate(ambulances):
+            with ambulance_cols[i % 3]:
+                if st.button(f"🚑 {vehicle['fleet_id']} · {vehicle['status']}", key=f"select_{vehicle['fleet_id']}", type='primary' if vehicle['fleet_id'] == active_id else 'secondary', width='stretch'):
+                    st.session_state['selected_ambulance_id'] = vehicle['fleet_id']
+                    st.rerun()
+                st.caption(vehicle['name'])
+
+        st.markdown(f"#### Selected ambulance · {selected['fleet_id']}")
+        st.write(f"**Gazebo model:** `{selected['name']}` · **Status:** {selected['status']}")
+        detail_pose = selected['pose']
+        d1, d2, d3 = st.columns(3)
+        d1.metric('X POSITION', f"{detail_pose['x']:.2f} m")
+        d2.metric('Y POSITION', f"{detail_pose['y']:.2f} m")
+        d3.metric('SPEED', f"{selected['speed_mps']:.2f} m/s")
+        st.caption(f"Heading {math.degrees(detail_pose['yaw']):.1f}° · pose source: {'live Gazebo' if selected['live_pose'] else 'SDF spawn position'}")
+        if selected['name'] == 'ambulance':
+            destination = status.get('destination') or {}
+            st.write(f"**Mission:** {status.get('state', 'IDLE')} · **Destination:** {destination.get('name', metrics.get('goal') or 'none')}")
+            st.write(f"**Battery:** {float(metrics.get('battery_pct', 100) or 0):.1f}% · **Distance:** {float(metrics.get('distance_m', status.get('distance_m', 0)) or 0):.1f} m · **ETA:** {float(status.get('eta_s', metrics.get('eta_s', 0)) or 0):.0f} sec")
+            st.write(f"**Route:** {' → '.join(status.get('route_nodes') or []) or 'No active Nav2 route'} · **Replans:** {int(metrics.get('replans', status.get('replans', 0)) or 0)}")
+            events = read_json('events.json') or metrics.get('events') or []
+            st.caption('Recent digital-twin log: ' + (' · '.join(e.get('event', '') for e in events[-3:]) or 'waiting for events'))
+        else:
+            mode = 'Parked at station' if selected['status'] == 'PARKED' else 'Static district ambulance' if selected['status'] == 'STATIONED' else 'Waypoint-driven city fleet'
+            st.write(f"**Operation:** {mode} · **Dynamic pose:** {'available' if selected['live_pose'] else 'not reported'}")
+            if selected['waypoints']:
+                st.write('**Loop waypoints:** ' + ' → '.join(f"({x:g}, {y:g})" for x, y in selected['waypoints']))
+            else:
+                st.write('**Configured position:** ' + ('parked / station berth' if selected['status'] in ('PARKED', 'STATIONED') else 'no waypoint route in SDF'))
+        with st.expander('Full selected ambulance record'):
+            record = {k: v for k, v in selected.items() if k != 'live_pose'}
+            record['pose_source'] = 'last live Gazebo pose' if selected['live_pose'] else 'SDF configured spawn pose'
+            if selected['name'] == 'ambulance':
+                record['mission_status'] = status
+                record['digital_twin_telemetry'] = metrics
+            st.json(record, expanded=True)
+
+    with st.expander(f"All vehicles · {sum(v['kind'] != 'ambulance' for v in fleet)} traffic / service vehicles", expanded=False):
+        rows = [{
+            'ID': v['fleet_id'], 'Gazebo model': v['name'], 'Type': v['kind'].title(),
+            'Status': v['status'], 'X (m)': round(v['pose']['x'], 2), 'Y (m)': round(v['pose']['y'], 2),
+            'Pose source': 'Live Gazebo' if v['live_pose'] else 'SDF spawn position',
+        } for v in fleet if v['kind'] != 'ambulance']
+        st.dataframe(rows, width='stretch', hide_index=True, height=360)
 
     if pose.get('x') is None:
         st.warning('Waiting for the Gazebo ambulance odometry publisher. The map is centered at the ambulance station until its first pose arrives.')
